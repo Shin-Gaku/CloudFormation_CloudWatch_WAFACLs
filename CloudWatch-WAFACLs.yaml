@@ -1,0 +1,448 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation_CloudWatch-WAFACLs'
+
+Parameters:
+  SSHPCIP:
+    Type: String
+    Description: "ローカルPCからEC2へSSH接続時のIPアドレス"
+  
+  DBMasterPassword:
+    Type: String
+    NoEcho: true #コンソール上に平文が露出しないように
+    Description: "DBマスターパスワード"
+  
+  RDSMonitoringRole:
+    Type: String
+    Default: arn:aws:iam::029377893487:role/rds-monitoring-role
+    Description: "RDS MonitoringRoleArn"
+
+  # AMIは最新のAMI IDをパラメータストアから取得する
+  Ec2ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+# VPC作成
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: aws-study-vpc
+
+# パブリックサブネット
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.0.0/20
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: aws-study-subnet-public1-ap-northeast-1a
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.16.0/20
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: aws-study-subnet-public2-ap-northeast-1c
+
+# プライベートサブネット
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.128.0/20
+      Tags:
+        - Key: Name
+          Value: aws-study-subnet-private1-ap-northeast-1a
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 1
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      CidrBlock: 10.0.144.0/20
+      Tags:
+        - Key: Name
+          Value: aws-study-subnet-private2-ap-northeast-1c
+
+# インターネットゲートウェイ
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: aws-study-igw
+
+# インターネットゲートウェイアタッチメント
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+# 共通ルートテーブル
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: aws-study-rtb-public
+
+# インターネットルート
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: aws-study-rtb-private1-ap-northeast-1a
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: aws-study-rtb-private2-ap-northeast-1c
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+  
+# EC2インスタンス生成
+# Step 1: Create a Security Group
+  AwsStudyEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: aws-study-ec2-sg
+      GroupDescription: EC2-SG_SSH-MyPC_HTTP-ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHPCIP
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref SecurityGroupALB
+
+# Step 2: Create an EC2 Instance
+  AwsStudyEc2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref Ec2ImageId
+      InstanceType: t3.micro
+      KeyName: aws-study_20251010
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref AwsStudyEc2SecurityGroup
+      MetadataOptions:
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 2
+        HttpTokens: required
+      PrivateDnsNameOptions:
+        HostnameType: ip-name
+        EnableResourceNameDnsARecord: false
+        EnableResourceNameDnsAAAARecord: false
+      Tags:
+        - Key: Name
+          Value: aws-study-ec2
+
+# RDS用サブネットグループ
+  RDSDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: RDS-SubnetGroup
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+# セキュリティグループ（RDS用）
+  RDSInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: aws-study-rds-sg
+      GroupDescription: RDS-MySql-SubnetGroup
+      VpcId: !Ref VPC
+
+# セキュリティグループのインバウンドルール（RDS用）
+  RDSInstanceSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RDSInstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref AwsStudyEc2SecurityGroup
+
+# RDSインスタンス
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mysql
+      EngineVersion: 8.0.42
+      DBInstanceClass: db.t4g.micro
+      DBSubnetGroupName: !Ref RDSDBSubnetGroup
+      VPCSecurityGroups: 
+        - !Ref RDSInstanceSecurityGroup
+      AllocatedStorage: 20
+      BackupRetentionPeriod: 1
+      MonitoringRoleArn: !Ref RDSMonitoringRole #パラメータ化
+      MonitoringInterval: 60
+      EnableCloudwatchLogsExports:
+        - audit
+        - error
+        - general
+        - iam-db-auth-error
+        - slowquery
+      DBInstanceIdentifier: aws-study-rds
+      MasterUsername: root
+      MasterUserPassword: !Ref DBMasterPassword
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+
+# セキュリティグループ（ALB用）
+  SecurityGroupALB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB-HTTPlistener
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: aws-study-alb-tg
+
+# ALB
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: aws-study-alb
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref SecurityGroupALB
+      Type: application
+      IpAddressType: ipv4
+      Tags:
+        - Key: Name
+          Value: aws-study-alb
+
+#ターゲットグループ
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: aws-study-tg
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 8080
+      TargetType: instance
+      Targets:
+        - Id: !Ref AwsStudyEc2Instance
+          Port: 8080
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "8080"
+      HealthCheckPath: "/"
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: aws-study-tg
+
+#ALBのリスナー
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+# CloudWatch Alarm
+  EC2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: "aws-study-ec2cpu-alarm"
+      AlarmDescription: "CPU Alarm 3%"
+      Namespace: "AWS/EC2"
+      MetricName: "CPUUtilization"
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref AwsStudyEc2Instance
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Name
+          Value: aws-study-ec2cpu-alarm
+
+# WAF WebACL
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: WebACL
+      Description: "ALB protection using Core rule set"
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: CPUUtilization
+      Rules:
+        - Name: CoreRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-study-core-rules
+      Tags:
+        - Key: Name
+          Value: aws-study-waf
+
+# WAF WebACLをALBに紐づけ
+  WebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !GetAtt ALB.LoadBalancerArn
+      WebACLArn: !GetAtt WebACL.Arn
+
+# WAFLogグループ（CloudWatchアラームやCloudWatch Logsのログ出力）
+  WAFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: aws-waf-logs-study
+      RetentionInDays: 7
+      Tags:
+        - Key: Name
+          Value: aws-study-waflogs
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+# WAFLogコンフィギュレーション
+  WAFLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WebACL.Arn
+      LogDestinationConfigs:
+        - !GetAtt WAFLogGroup.Arn
+      LoggingFilter:
+        DefaultBehavior: DROP
+        Filters:
+          - Behavior: KEEP
+            Requirement: MEETS_ANY
+            Conditions:
+              - ActionCondition:
+                  Action: BLOCK
+              - ActionCondition:
+                  Action: COUNT
+
+Outputs:
+
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC'
+
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !Join [',', [!Ref PublicSubnet1, !Ref PublicSubnet2]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnets'
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [',', [!Ref PrivateSubnet1, !Ref PrivateSubnet2]]
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnets'
+
+  PublicRouteTable:
+    Description: A reference to the public route table
+    Value: !Ref PublicRouteTable
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicRouteTable'
+
+  PrivateRouteTable1:
+    Description: A reference to the private route table 1
+    Value: !Ref PrivateRouteTable1
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateRouteTable1'
+
+  PrivateRouteTable2:
+    Description: A reference to the private route table 2
+    Value: !Ref PrivateRouteTable2
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateRouteTable2'
