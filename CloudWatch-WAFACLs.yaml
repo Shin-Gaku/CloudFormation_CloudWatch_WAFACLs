@@ -10,11 +10,6 @@ Parameters:
     Type: String
     NoEcho: true #コンソール上に平文が露出しないように
     Description: "DBマスターパスワード"
-  
-  RDSMonitoringRole:
-    Type: String
-    Default: arn:aws:iam::029377893487:role/rds-monitoring-role
-    Description: "RDS MonitoringRoleArn"
 
   # AMIは最新のAMI IDをパラメータストアから取得する
   Ec2ImageId:
@@ -226,6 +221,24 @@ Resources:
       ToPort: 3306
       SourceSecurityGroupId: !Ref AwsStudyEc2SecurityGroup
 
+# RDSMonitoring IAM Role
+  RDSMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-study-RDSMonitoringRole
+      Path: /service-role/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
 # RDSインスタンス
   RDSInstance:
     Type: AWS::RDS::DBInstance
@@ -238,7 +251,7 @@ Resources:
         - !Ref RDSInstanceSecurityGroup
       AllocatedStorage: 20
       BackupRetentionPeriod: 1
-      MonitoringRoleArn: !Ref RDSMonitoringRole #パラメータ化
+      MonitoringRoleArn: !GetAtt RDSMonitoringRole.Arn
       MonitoringInterval: 60
       EnableCloudwatchLogsExports:
         - audit
@@ -354,7 +367,7 @@ Resources:
       VisibilityConfig:
         SampledRequestsEnabled: true
         CloudWatchMetricsEnabled: true
-        MetricName: CPUUtilization
+        MetricName: aws-study-WebACL
       Rules:
         - Name: CoreRuleSet
           Priority: 1
